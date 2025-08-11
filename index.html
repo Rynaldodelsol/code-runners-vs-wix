@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Code Runners vs WIX — Prototype</title>
+  <style>
+    html, body {height:100%; margin:0; background:#0b0f14;}
+    #game {width:100%; height:100%;}
+    .photon {position:fixed; left:12px; bottom:12px; color:#9fb3c8; font:12px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; opacity:.7}
+    .photon a {color:#9fb3c8; text-decoration:none; border-bottom:1px dashed #405469}
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.0/dist/phaser.min.js"></script>
+</head>
+<body>
+  <div id="game"></div>
+  <div class="photon">Contrôles : ZQSD ou flèches pour bouger • E pour <em>unit_test</em> • Espace pour <em>hotfix</em> • R pour recommencer</div>
+  <script>
+  ;(() => {
+    const W = 960, H = 540
+
+    // --- tiny sound helper (no assets) ---
+    const Audioy = {
+      ctx: null,
+      init(){ if(!this.ctx) this.ctx = new (window.AudioContext||window.webkitAudioContext)() },
+      beep({freq=880, dur=0.08, type='sine', vol=0.03}={}){
+        try{ this.init(); const t=this.ctx.currentTime; const o=this.ctx.createOscillator(); const g=this.ctx.createGain(); o.type=type; o.frequency.value=freq; g.gain.value=vol; o.connect(g); g.connect(this.ctx.destination); o.start(t); o.stop(t+dur);}catch(e){}
+      }
+    }
+
+    class MainScene extends Phaser.Scene {
+      constructor(){ super('main') }
+      preload(){ /* no external assets */ }
+
+      create(){
+        this.gameOver = false
+        this.score = 0
+        this.builds = 0 // 3 snippets => +1 build
+        this.snippets = 0
+        this.debt = 0
+        this.debtRate = 2 // per second
+        this.lastDash = -999
+        this.dashCd = 1200 // ms
+        this.isDashing = false
+        this.wixActive = false
+
+        // camera bg grid
+        this.addGridBg()
+
+        // dynamic textures
+        this.makeTextures()
+
+        // player
+        this.player = this.physics.add.sprite(W/2, H/2, 'player')
+        this.player.setDepth(10).setCircle(16, 0, 0)
+        this.player.speed = 200
+        this.player.shield = null
+
+        // groups
+        this.enemies = this.physics.add.group()
+        this.snipGroup = this.physics.add.group()
+        this.projectiles = this.physics.add.group()
+
+        // spawn timers
+        this.time.addEvent({delay: 900, loop: true, callback: () => this.spawnEnemy()})
+        this.time.addEvent({delay: 1400, loop: true, callback: () => this.spawnSnippet()})
+
+        // ui
+        this.makeUI()
+
+        // collisions
+        this.physics.add.overlap(this.player, this.snipGroup, (p, s) => {
+          s.destroy();
+          this.snippets++
+          if(this.snippets >= 3){ this.snippets = 0; this.builds++; this.flashText(this.uiBuilds, '#79ffa1') }
+          else { this.flashText(this.uiSnip, '#ffe47a') }
+          Audioy.beep({freq: 1200})
+          this.updateUI()
+        })
+
+        this.physics.add.overlap(this.player, this.enemies, (p, e) => this.hitPlayer(e))
+        this.physics.add.overlap(this.player, this.projectiles, (p, m) => this.hitPlayer(m))
+
+        // input
+        this.cursors = this.input.keyboard.createCursorKeys()
+        this.keys = this.input.keyboard.addKeys('Z,Q,S,D,E,R')
+
+        this.input.keyboard.on('keydown-E', () => this.castUnitTest())
+        this.input.keyboard.on('keydown-SPACE', () => this.castHotfix())
+        this.input.keyboard.on('keydown-R', () => this.restart())
+
+        // wix events
+        this.wixTimer = this.time.addEvent({ delay: 1000, loop: true, callback: () => {
+          if(this.gameOver) return
+          if(!this.wixActive){
+            this.debt = Math.min(100, this.debt + this.debtRate)
+            this.updateDebtBar()
+            if(this.debt >= 100) this.summonWix()
+          }
+        }})
+      }
+
+      addGridBg(){
+        const g = this.add.graphics()
+        g.fillStyle(0x0b0f14, 1).fillRect(0,0,W,H)
+        g.lineStyle(1, 0x16202b, 1)
+        for(let x=0; x<=W; x+=24){ g.beginPath(); g.moveTo(x,0); g.lineTo(x,H); g.strokePath() }
+        for(let y=0; y<=H; y+=24){ g.beginPath(); g.moveTo(0,y); g.lineTo(W,y); g.strokePath() }
+        g.setDepth(0)
+      }
+
+      makeTextures(){
+        const g = this.make.graphics({x:0,y:0, add:false})
+        // player
+        g.clear(); g.fillStyle(0x4ad1ff,1); g.fillCircle(16,16,16); g.lineStyle(2,0xffffff,1); g.strokeCircle(16,16,16)
+        g.generateTexture('player', 32, 32)
+        // snippet
+        g.clear(); g.fillStyle(0xffcf4a,1); this.poly(g,16,16,6,12); g.lineStyle(2,0x2b2b2b,0.7); this.polyStroke(g,16,16,6,12)
+        g.generateTexture('snippet', 32, 32)
+        // enemy
+        g.clear(); g.fillStyle(0xff5d7a,1); g.fillRect(0,0,26,26); g.lineStyle(2,0xffffff,0.8); g.strokeRect(1,1,24,24)
+        g.generateTexture('bug', 26, 26)
+        // wix boss
+        g.clear(); g.fillStyle(0x9b5cff,1); g.fillCircle(48,48,48); g.lineStyle(3,0xffffff,0.9); g.strokeCircle(48,48,48)
+        g.generateTexture('wix', 96, 96)
+        // shield
+        g.clear(); g.lineStyle(3,0x79ffa1,1); g.strokeCircle(22,22,22)
+        g.generateTexture('shield', 44, 44)
+        // projectile
+        g.clear(); g.fillStyle(0x95a7b7,1); g.fillCircle(6,6,6)
+        g.generateTexture('micro', 12, 12)
+        g.destroy()
+      }
+
+      poly(g, x, y, sides, radius){ const pts=[]; for(let i=0;i<sides;i++){ const a=(i/sides)*Math.PI*2 - Math.PI/2; pts.push({x:x+Math.cos(a)*radius, y:y+Math.sin(a)*radius})}; g.beginPath(); g.moveTo(pts[0].x, pts[0].y); for(let i=1;i<pts.length;i++){ g.lineTo(pts[i].x, pts[i].y)}; g.closePath(); g.fillPath() }
+      polyStroke(g, x, y, sides, radius){ const pts=[]; for(let i=0;i<sides;i++){ const a=(i/sides)*Math.PI*2 - Math.PI/2; pts.push({x:x+Math.cos(a)*radius, y:y+Math.sin(a)*radius})}; g.beginPath(); g.moveTo(pts[0].x, pts[0].y); for(let i=1;i<pts.length;i++){ g.lineTo(pts[i].x, pts[i].y)}; g.closePath(); g.strokePath() }
+
+      makeUI(){
+        const uiStyle = { fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif', fontSize: '14px', color: '#b9cee3' }
+        this.uiText = this.add.text(12, 10, '', uiStyle).setDepth(100)
+        this.uiSnip = this.add.text(12, 30, '', uiStyle).setDepth(100)
+        this.uiBuilds = this.add.text(12, 50, '', uiStyle).setDepth(100)
+        // debt bar
+        this.debtBg = this.add.rectangle(W-212, 18, 200, 12, 0x182432).setOrigin(0,0).setDepth(100)
+        this.debtFill = this.add.rectangle(W-212, 18, 0, 12, 0xff7ba5).setOrigin(0,0).setDepth(101)
+        this.add.text(W-212, 34, 'dette technique', { ...uiStyle, fontSize: '12px', color:'#8aa1b8' }).setDepth(100)
+        this.updateUI(); this.updateDebtBar()
+
+        // start tip
+        this.tip = this.add.text(W/2, H-24, 'survivre, shipper, merger', { ...uiStyle, color:'#8aa1b8' }).setOrigin(0.5,1)
+      }
+
+      updateUI(){
+        this.uiText.setText(`score ${Math.floor(this.score)}`)
+        this.uiSnip.setText(`snippets ${this.snippets}/3`)
+        this.uiBuilds.setText(`builds ${this.builds}`)
+      }
+
+      updateDebtBar(){
+        this.debtFill.width = 200 * (this.debt/100)
+      }
+
+      flashText(obj, color){
+        const prev = obj.style.color; obj.setColor(color)
+        this.time.delayedCall(120, () => obj.setColor(prev))
+      }
+
+      spawnEnemy(){
+        if(this.gameOver) return
+        const edge = Phaser.Math.Between(0,3)
+        const margin = 30
+        const x = edge===0? -margin : edge===1? W+margin : Phaser.Math.Between(0,W)
+        const y = edge===2? -margin : edge===3? H+margin : Phaser.Math.Between(0,H)
+        const e = this.enemies.create(x,y,'bug')
+        e.setData('speed', Phaser.Math.Between(60, 110))
+        e.setBounce(1,1).setCollideWorldBounds(true)
+      }
+
+      spawnSnippet(){
+        if(this.gameOver) return
+        const x = Phaser.Math.Between(40, W-40)
+        const y = Phaser.Math.Between(40, H-40)
+        const s = this.snipGroup.create(x,y,'snippet')
+        s.setBounce(1,1)
+      }
+
+      castUnitTest(){
+        if(this.gameOver) return
+        if(this.builds <= 0) return this.flashText(this.uiBuilds, '#ff7b7b')
+        this.builds--
+        if(this.player.shield) this.player.shield.destroy()
+        const shield = this.add.sprite(this.player.x, this.player.y, 'shield').setDepth(9)
+        this.player.shield = shield
+        this.tweens.add({targets: shield, alpha: {from:1, to:0.5}, yoyo:true, duration:220, repeat: -1})
+        this.time.delayedCall(3000, () => { if(shield && shield.active){ shield.destroy(); this.player.shield = null } })
+        Audioy.beep({freq: 760})
+        this.updateUI()
+      }
+
+      castHotfix(){
+        if(this.gameOver) return
+        const now = Date.now()
+        if(now - this.lastDash < this.dashCd) return this.flashText(this.uiText, '#ffb36b')
+        this.lastDash = now
+        this.isDashing = true
+        const v = this.getMoveVector(); const mag = Math.max(1, v.length())
+        const dashSpeed = 460
+        const dx = (v.x / mag) * dashSpeed, dy = (v.y / mag) * dashSpeed
+        this.player.setVelocity(dx, dy)
+        this.time.delayedCall(150, () => { this.isDashing = false })
+        Audioy.beep({freq: 320})
+      }
+
+      summonWix(){
+        this.wixActive = true
+        this.debt = 100; this.updateDebtBar()
+        this.wix = this.physics.add.sprite(-80, -80, 'wix').setDepth(5)
+        this.wix.setImmovable(true)
+        this.time.addEvent({ delay: 600, repeat: 10, callback: () => this.wixShoot() })
+        // chase pattern for 10 s then leave
+        this.time.delayedCall(10000, () => {
+          if(!this.wix) return
+          this.wix.destroy(); this.wix=null; this.wixActive = false; this.debt = 0; this.updateDebtBar()
+        })
+      }
+
+      wixShoot(){
+        if(!this.wix || this.gameOver) return
+        // move wix towards player
+        const a = Phaser.Math.Angle.Between(this.wix.x, this.wix.y, this.player.x, this.player.y)
+        const step = 80
+        this.wix.x += Math.cos(a)*step; this.wix.y += Math.sin(a)*step
+        // emit micro-bots
+        for(let i=0;i<6;i++){
+          const ang = a + (i-2.5)*0.15
+          const m = this.projectiles.create(this.wix.x, this.wix.y, 'micro')
+          m.setData('vx', Math.cos(ang)*140)
+          m.setData('vy', Math.sin(ang)*140)
+        }
+      }
+
+      hitPlayer(danger){
+        if(this.gameOver) return
+        if(this.isDashing) return // invincible during dash
+        if(this.player.shield){ danger.destroy(); return }
+        this.onDeath()
+      }
+
+      onDeath(){
+        this.gameOver = true
+        this.player.setTint(0xff3b3b)
+        this.add.text(W/2, H/2, 'échec du build', { fontFamily:'system-ui, -apple-system, Segoe UI, Roboto, sans-serif', fontSize:'40px', color:'#ff7b7b' }).setOrigin(0.5)
+        const t = this.add.text(W/2, H/2+40, 'appuyer sur R pour recommencer', { fontFamily:'system-ui, -apple-system, Segoe UI, Roboto, sans-serif', fontSize:'16px', color:'#9fb3c8' }).setOrigin(0.5)
+        this.tweens.add({targets: t, alpha: {from:1,to:0.4}, yoyo:true, duration:500, repeat:-1})
+      }
+
+      restart(){ if(!this.gameOver) return; this.scene.restart() }
+
+      getMoveVector(){
+        const k = this.keys, c = this.cursors
+        let x=0, y=0
+        if(k.Q.isDown || c.left.isDown) x -= 1
+        if(k.D.isDown || c.right.isDown) x += 1
+        if(k.Z.isDown || c.up.isDown) y -= 1
+        if(k.S.isDown || c.down.isDown) y += 1
+        return new Phaser.Math.Vector2(x,y)
+      }
+
+      update(time, delta){
+        if(this.gameOver) return
+        // movement
+        const v = this.getMoveVector().normalize().scale(this.player.speed)
+        if(!this.isDashing) this.player.setVelocity(v.x, v.y)
+        if(this.player.shield){ this.player.shield.setPosition(this.player.x, this.player.y) }
+
+        // enemies move toward player
+        this.enemies.children.iterate(e => {
+          if(!e) return
+          const a = Phaser.Math.Angle.Between(e.x, e.y, this.player.x, this.player.y)
+          const s = e.getData('speed') || 80
+          e.setVelocity(Math.cos(a)*s, Math.sin(a)*s)
+        })
+
+        // projectiles
+        this.projectiles.children.iterate(m => { if(!m) return; m.x += m.getData('vx')*delta/1000; m.y += m.getData('vy')*delta/1000; if(m.x<-20||m.x>W+20||m.y<-20||m.y>H+20) m.destroy() })
+
+        // scoring
+        this.score += delta/16
+        this.updateUI()
+      }
+    }
+
+    const config = {
+      type: Phaser.AUTO,
+      width: W,
+      height: H,
+      backgroundColor: '#0b0f14',
+      parent: 'game',
+      physics: { default: 'arcade', arcade: { gravity: {y:0}, debug: false } },
+      scene: [MainScene]
+    }
+
+    new Phaser.Game(config)
+  })()
+  </script>
+</body>
+</html>
